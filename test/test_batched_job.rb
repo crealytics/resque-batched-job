@@ -12,6 +12,7 @@ class BatchedJobTest < Test::Unit::TestCase
     redis.del(@batch)
     redis.del("queue:test")
     redis.del("#{@batch}:lock")
+    redis.del("#{@batch}:#{Resque::Plugins::BatchedJob::AFTER_BATCH_HOOKS_POTENTIALLY_IN_PROGRESS}")
   end
 
   def test_list
@@ -174,6 +175,26 @@ class BatchedJobTest < Test::Unit::TestCase
     Resque.dequeue(Job, @batch_id, "foo")
     assert(Job.batch_complete?(@batch_id))
     assert_equal(false, Job.batch_exist?(@batch_id))
+  end
+
+  # batch_complete? should only return true if all after batch hooks are done
+  class MyJob < Job
+    @queue = :test
+
+    def self.after_batch_hook(batch_id, arg)
+      raise 'Batched Job is still in progress!' if MyJob.batch_complete?(batch_id)
+      super(batch_id, arg)
+    end
+  end
+
+  def test_batch_complete
+    assert_nothing_raised do
+      Resque.enqueue(MyJob, @batch_id, "arg#{rand(100)}")
+      Resque.reserve(:test).perform
+    end
+
+    assert($batch_complete)
+    assert(MyJob.batch_complete?(@batch_id))
   end
 
   private

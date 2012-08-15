@@ -22,6 +22,9 @@ module Resque
 
       include Resque::Helpers
 
+      AFTER_BATCH_HOOKS_POTENTIALLY_IN_PROGRESS = 'after_batch_hooks_potentially_in_progress'
+      EXPIRATION = 24 * 60 * 60
+
       # Helper method used to generate the batch key.
       #
       # @param [Object, #to_s] id Batch identifier. Any Object that responds to #to_s
@@ -45,10 +48,20 @@ module Resque
       #
       # @param id (see Resque::Plugins::BatchedJob#after_enqueue_batch)
       def after_perform_batch(id, *args)
-        if remove_batched_job(id, *args) == 0
-          after_batch_hooks = Resque::Plugin.after_batch_hooks(self)
-          after_batch_hooks.each do |hook|
-            send(hook, id, *args)
+        mutex(id) do |bid|
+          redis.setex("#{bid}:#{AFTER_BATCH_HOOKS_POTENTIALLY_IN_PROGRESS}", EXPIRATION, 'true')
+        end
+
+        begin
+          if remove_batched_job(id, *args) == 0
+            after_batch_hooks = Resque::Plugin.after_batch_hooks(self)
+            after_batch_hooks.each do |hook|
+              send(hook, id, *args)
+            end
+          end
+        ensure
+          mutex(id) do |bid|
+            redis.del("#{bid}:#{AFTER_BATCH_HOOKS_POTENTIALLY_IN_PROGRESS}")
           end
         end
       end
@@ -66,7 +79,7 @@ module Resque
       # @param id (see Resque::Plugins::BatchedJob#batch)
       def batch_complete?(id)
         mutex(id) do |bid|
-          redis.llen(bid) == 0
+          redis.llen(bid) == 0 && !redis.exists("#{bid}:#{AFTER_BATCH_HOOKS_POTENTIALLY_IN_PROGRESS}")
         end
       end
 
